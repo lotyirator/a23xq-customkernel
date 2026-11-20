@@ -1,0 +1,122 @@
+name: Build Fast SM-A236B Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex git libssl-dev libelf-dev python3 zip unzip wget zstd
+
+      - name: Clone SM-A236B kernel source and integrate KernelSU-Next
+        run: |
+          git clone --depth=1 https://github.com/Haky86Builds/android_kernel_samsung_sm6375 -b lineage-22.2 kernel
+          cd kernel
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -
+
+      - name: Download Clang 19 toolchain
+        run: |
+          mkdir -p clang
+          wget -q https://github.com/ZyCromerZ/Clang/releases/download/19.0.0git-20240429-release/Clang-19.0.0git-20240429.tar.gz -O clang.tar.gz
+          tar -xzf clang.tar.gz -C clang
+
+      - name: Configure defconfig with performance and KernelSU-Next flags
+        run: |
+          cd kernel
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          make O=out ARCH=arm64 vendor/a23xq_defconfig
+
+          # 1. KernelSU-Next requirements for Linux 5.4 non-GKI
+          # 2. Android 16 GSI (BP4A) eBPF and ART stability
+          # 3. Strip Samsung Knox / RKP / KDP / DEFEX overhead
+          # 4. 300Hz timer + full PREEMPT for faster UI response
+          # 5. LZ4/ZSTD ZRAM + Kyber I/O + Google BBR TCP
+          # 6. Disable heavy kernel debug logging
+          ./scripts/config --file out/.config \
+            -e KSU \
+            -e KPROBES \
+            -e HAVE_KPROBES \
+            -e KPROBE_EVENTS \
+            -e OVERLAY_FS \
+            -e TMPFS_XATTR \
+            -e PSI \
+            -e USERFAULTFD \
+            -e BPF_SYSCALL \
+            -e CGROUP_BPF \
+            -e NET_CLS_BPF \
+            -e CGROUP_SCHED \
+            -e MEMCG \
+            -d SAMSUNG_PROCA \
+            -d RKP \
+            -d KDP \
+            -d UH \
+            -d DEFEX \
+            -d SECURITY_DEFEX \
+            -d FIVE \
+            -e HZ_300 \
+            -d HZ_100 \
+            -d HZ_250 \
+            -d HZ_1000 \
+            -e PREEMPT \
+            -d PREEMPT_NONE \
+            -d PREEMPT_VOLUNTARY \
+            -e ZRAM \
+            -e CRYPTO_LZ4 \
+            -e CRYPTO_ZSTD \
+            -e ZRAM_DEF_COMP_LZ4 \
+            -e MQ_IOSCHED_KYBER \
+            -e TCP_CONG_ADVANCED \
+            -e TCP_CONG_BBR \
+            -e DEFAULT_BBR \
+            -d DEFAULT_CUBIC \
+            -d DEFAULT_RENO \
+            -e NET_SCH_FQ \
+            -d SLUB_DEBUG \
+            -d SCHED_DEBUG \
+            -d SCHEDSTATS \
+            -d DEBUG_PREEMPT \
+            -d DEBUG_SPINLOCK \
+            -d DEBUG_MUTEXES \
+            -d PROVE_LOCKING
+
+          make O=out ARCH=arm64 olddefconfig
+
+      - name: Compile kernel
+        run: |
+          cd kernel
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          make -j$(nproc --all) O=out ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1
+
+      - name: Package flashable AnyKernel3 ZIP
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' AnyKernel3/anykernel.sh
+          sed -i 's/block=\/dev\/block\/platform\/omap\/omap_hsmmc.0\/by-name\/boot;/block=auto;/g' AnyKernel3/anykernel.sh
+          sed -i 's/is_slot_device=0;/is_slot_device=auto;/g' AnyKernel3/anykernel.sh
+
+          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          elif [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
+          else
+            cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+          fi
+
+          cd AnyKernel3
+          zip -r9 ../AnyKernel3-SM-A236B-Fast-KSU-A16GSI.zip * -x .git README.md *placeholder
+
+      - name: Upload compiled kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyKernel3-SM-A236B-Fast-KSU-A16GSI
+          path: AnyKernel3-SM-A236B-Fast-KSU-A16GSI.zip
